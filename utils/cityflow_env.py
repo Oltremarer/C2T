@@ -15,6 +15,7 @@ from functools import reduce
 location_dict = {"North": "N", "South": "S", "East": "E", "West": "W"}
 location_dict_reverse = {"N": "North", "S": "South", "E": "East", "W": "West"}
 direction_dict = {"go_straight": "T", "turn_left": "L", "turn_right": "R"}
+direction_dict_reverse = {value: key for key, value in direction_dict.items()}
 
 class Intersection:
     def __init__(self, inter_id, dic_traffic_env_conf, eng, light_id_dict, path_to_log, lanes_length_dict):
@@ -992,3 +993,245 @@ class CityFlowEnv:
         for key, value in lanes_length_dict.items():
             lane_normalize_factor[key] = value / min_length
         return lane_normalize_factor, lanes_length_dict
+
+
+class TrafficMetrics:
+    """
+    Compute safety-centric metrics required by the C²T pipeline.
+    """
+
+    def __init__(self, env: CityFlowEnv, harsh_brake_threshold: float = -4.5, max_ttc: float = 60.0,
+                 red_speed_threshold: float = 1.0):
+        self.env = env
+        self.harsh_brake_threshold = harsh_brake_threshold
+        self.max_ttc = max_ttc
+        self.red_speed_threshold = red_speed_threshold
+        self.delta_t = float(self.env.dic_traffic_env_conf.get("INTERVAL", 1.0))
+        self.last_speed: Dict[str, float] = {}
+        self.vehicle_lane: Dict[str, str] = {}
+        self.lane_to_junction: Dict[str, str] = {}
+        self.phase_lane_mapping: Dict[str, Dict[int, Set[str]]] = {}
+        self.refresh_structure_mappings()
+
+    def refresh_structure_mappings(self):
+        """
+        Should be called after the environment is (re)initialized so that lane mappings
+        remain aligned with the current scenario.
+        """
+        self.lane_to_junction = self._build_lane_to_junction()
+        self.phase_lane_mapping = self._build_phase_lane_mapping()
+        self.last_speed.clear()
+        self.vehicle_lane.clear()
+
+    def reset(self):
+        """Clear state that should not persist across episodes."""
+        self.last_speed.clear()
+        self.vehicle_lane.clear()
+
+    def _build_lane_to_junction(self) -> Dict[str, str]:
+        mapping = {}
+        if not self.env.list_intersection:
+            return mapping
+        for inter in self.env.list_intersection:
+            for lane in inter.list_entering_lanes:
+                mapping[lane] = inter.inter_name
+        return mapping
+
+    def _build_phase_lane_mapping(self) -> Dict[str, Dict[int, Set[str]]]:
+        mapping: Dict[str, Dict[int, Set[str]]] = {}
+        if self.env.intersection_dict is None:
+            self.env.create_intersection_dict()
+        if self.env.intersection_dict is None or not self.env.list_intersection:
+            return mapping
+        inter_lookup = {inter.inter_name: inter for inter in self.env.list_intersection}
+
+        for inter_id, meta in self.env.intersection_dict.items():
+            roads = meta.get("roads", {})
+            inter_obj = inter_lookup.get(inter_id)
+            if inter_obj is None:
+                continue
+            approach_map = inter_obj.dic_entering_approach_to_edge
+            phase_mapping: Dict[int, Set[str]] = {}
+            for phase_key, phase_info in meta.get("phases", {}).items():
+                if phase_key == "Y":
+                    continue
+                phase_idx = phase_info.get("idx")
+                if phase_idx is None:
+                    continue
+                movements = phase_info.get("movements") or self._parse_phase_movements(phase_key)
+                lane_ids: Set[str] = set()
+                for mv in movements:
+                    if len(mv) < 2:
+                        continue
+                    approach = mv[0]
+                    direction_symbol = mv[1]
+                    road_id = approach_map.get(approach)
+                    if road_id is None:
+                        continue
+                    dir_key = direction_dict_reverse.get(direction_symbol)
+                    if dir_key is None:
+                        continue
+                    road_meta = roads.get(road_id)
+                    if road_meta is None:
+                        continue
+                    lane_indices = road_meta.get("lanes", {}).get(dir_key, [])
+                    for lane_idx in lane_indices:
+                        lane_ids.add(f"{road_id}_{lane_idx}")
+                if lane_ids:
+                    phase_mapping[int(phase_idx)] = lane_ids
+            mapping[inter_id] = phase_mapping
+        return mapping
+
+    @staticmethod
+    def _parse_phase_movements(phase_key: str) -> List[str]:
+        if "|" in phase_key:
+            return [token for token in phase_key.split("|") if token]
+        return [phase_key[i:i + 2] for i in range(0, len(phase_key), 2) if len(phase_key[i:i + 2]) == 2]
+
+    def _update_vehicle_lane_cache(self, lane_vehicles: Dict[str, List[str]]):
+        self.vehicle_lane.clear()
+        for lane_id, vehs in lane_vehicles.items():
+            for veh_id in vehs:
+                if "shadow" in veh_id:
+                    continue
+                self.vehicle_lane[veh_id] = lane_id
+
+    def _empty_metrics_template(self):
+        return {
+            "min_ttc": self.max_ttc,
+            "harsh_brakes": 0,
+            "red_violations": 0,
+            "total_queue": 0.0
+        }
+
+    def get_safety_metrics(self):
+        if not self.env.system_states:
+            return {"per_junction": {}, "global": {"min_ttc": self.max_ttc,
+                                                   "total_harsh_brakes": 0,
+                                                   "total_queue": 0.0,
+                                                   "total_red_violations": 0}}
+
+        lane_vehicles = self.env.system_states.get("get_lane_vehicles", {})
+        lane_waiting = self.env.system_states.get("get_lane_waiting_vehicle_count", {})
+        vehicle_speed = self.env.system_states.get("get_vehicle_speed", {})
+        vehicle_distance = self.env.system_states.get("get_vehicle_distance", {})
+        self._update_vehicle_lane_cache(lane_vehicles)
+        per_junction = defaultdict(self._empty_metrics_template)
+        global_summary = {
+            "min_ttc": self.max_ttc,
+            "total_harsh_brakes": 0,
+            "total_queue": 0.0,
+            "total_red_violations": 0
+        }
+
+        current_phase = {}
+        if self.env.list_intersection:
+            for inter in self.env.list_intersection:
+                current_phase[inter.inter_name] = inter.current_phase_index
+
+        for lane_id, vehs in lane_vehicles.items():
+            junction_id = self.lane_to_junction.get(lane_id)
+            if junction_id is None:
+                continue
+            metrics = per_junction[junction_id]
+            queue_val = float(lane_waiting.get(lane_id, 0.0))
+            metrics["total_queue"] += queue_val
+            global_summary["total_queue"] += queue_val
+
+            ttc_val = self._lane_min_ttc(vehs, vehicle_speed, vehicle_distance)
+            if ttc_val is not None:
+                metrics["min_ttc"] = min(metrics["min_ttc"], ttc_val)
+                global_summary["min_ttc"] = min(global_summary["min_ttc"], ttc_val)
+
+            self._detect_red_violations(
+                lane_id=lane_id,
+                vehs=vehs,
+                vehicle_speed=vehicle_speed,
+                junction_id=junction_id,
+                metrics=metrics,
+                global_summary=global_summary,
+                current_phase=current_phase.get(junction_id)
+            )
+
+        self._update_harsh_brake_counts(vehicle_speed, per_junction, global_summary)
+        self._cleanup_missing_vehicles()
+
+        # finalize metrics
+        finalized = {}
+        for junction_id, metrics in per_junction.items():
+            finalized[junction_id] = {
+                "min_ttc": float(metrics["min_ttc"]),
+                "harsh_brakes": int(metrics["harsh_brakes"]),
+                "red_violations": int(metrics["red_violations"]),
+                "total_queue": float(metrics["total_queue"])
+            }
+
+        if not np.isfinite(global_summary["min_ttc"]):
+            global_summary["min_ttc"] = self.max_ttc
+
+        return {"per_junction": finalized, "global": global_summary}
+
+    def _lane_min_ttc(self, vehs: List[str], vehicle_speed: Dict[str, float], vehicle_distance: Dict[str, float]) -> Optional[float]:
+        if len(vehs) < 2:
+            return None
+        filtered = [veh for veh in vehs if "shadow" not in veh]
+        if len(filtered) < 2:
+            return None
+        sorted_vehicles = sorted(filtered, key=lambda vid: vehicle_distance.get(vid, 0.0), reverse=True)
+        min_ttc = self.max_ttc
+        for front, rear in zip(sorted_vehicles[:-1], sorted_vehicles[1:]):
+            dist_front = vehicle_distance.get(front, 0.0)
+            dist_rear = vehicle_distance.get(rear, 0.0)
+            dist_gap = max(dist_front - dist_rear, 0.0)
+            v_front = vehicle_speed.get(front, 0.0)
+            v_rear = vehicle_speed.get(rear, 0.0)
+            relative_speed = v_rear - v_front
+            if relative_speed <= 0 or dist_gap <= 0:
+                continue
+            ttc = min(dist_gap / max(relative_speed, 1e-6), self.max_ttc)
+            min_ttc = min(min_ttc, ttc)
+        if min_ttc == self.max_ttc:
+            return None
+        return float(min_ttc)
+
+    def _detect_red_violations(self, lane_id: str, vehs: List[str], vehicle_speed: Dict[str, float],
+                               junction_id: str, metrics: Dict[str, float], global_summary: Dict[str, float],
+                               current_phase: Optional[int]):
+        if current_phase is None:
+            return
+        allowed = self.phase_lane_mapping.get(junction_id, {}).get(current_phase, set())
+        if not allowed or lane_id in allowed:
+            return
+        for veh in vehs:
+            if "shadow" in veh:
+                continue
+            speed = float(vehicle_speed.get(veh, 0.0))
+            if speed <= self.red_speed_threshold:
+                continue
+            veh_info = self.env.eng.get_vehicle_info(veh)
+            if veh_info.get("speed", 0.0) <= self.red_speed_threshold:
+                continue
+            metrics["red_violations"] += 1
+            global_summary["total_red_violations"] += 1
+            break
+
+    def _update_harsh_brake_counts(self, vehicle_speed: Dict[str, float],
+                                   per_junction: Dict[str, Dict[str, float]],
+                                   global_summary: Dict[str, float]):
+        for veh_id, lane_id in self.vehicle_lane.items():
+            prev_speed = self.last_speed.get(veh_id)
+            current_speed = float(vehicle_speed.get(veh_id, 0.0))
+            if prev_speed is not None:
+                accel = (current_speed - prev_speed) / max(self.delta_t, 1e-6)
+                if accel < self.harsh_brake_threshold:
+                    junction_id = self.lane_to_junction.get(lane_id)
+                    if junction_id:
+                        per_junction[junction_id]["harsh_brakes"] += 1
+                        global_summary["total_harsh_brakes"] += 1
+            self.last_speed[veh_id] = current_speed
+
+    def _cleanup_missing_vehicles(self):
+        current_vehicle_ids = set(self.vehicle_lane.keys())
+        for veh_id in list(self.last_speed.keys()):
+            if veh_id not in current_vehicle_ids:
+                self.last_speed.pop(veh_id, None)
