@@ -9,7 +9,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from utils.c2t_features import apply_normalization, fit_normalization, load_normalization_params, save_normalization_params
+try:
+    from utils.c2t_features import apply_normalization, fit_normalization, load_normalization_params, save_normalization_params
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.append(str(ROOT))
+    from utils.c2t_features import apply_normalization, fit_normalization, load_normalization_params, save_normalization_params
 
 
 class PreferenceDataset(Dataset):
