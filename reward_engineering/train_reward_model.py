@@ -16,7 +16,7 @@ except ModuleNotFoundError:
     from pathlib import Path
     ROOT = Path(__file__).resolve().parents[1]
     if str(ROOT) not in sys.path:
-        sys.path.append(str(ROOT))
+        sys.path.insert(0, str(ROOT))
     from utils.c2t_features import apply_normalization, fit_normalization, load_normalization_params, save_normalization_params
 
 
