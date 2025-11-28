@@ -135,7 +135,9 @@ def main():
     args = parse_args()
     set_global_seeds(args.seed)
     env, env_conf, scenario_key = prepare_environment(args)
+    env.reset()
     metrics = TrafficMetrics(env)
+    metrics.refresh_structure_mappings()
 
     output_root = Path(args.output_dir) / scenario_key
     buffer_file = output_root / f"buffer_{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
