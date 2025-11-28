@@ -1209,7 +1209,8 @@ class TrafficMetrics:
             if speed <= self.red_speed_threshold:
                 continue
             veh_info = self.env.eng.get_vehicle_info(veh)
-            if veh_info.get("speed", 0.0) <= self.red_speed_threshold:
+            veh_speed = float(veh_info.get("speed", 0.0))
+            if veh_speed <= self.red_speed_threshold:
                 continue
             metrics["red_violations"] += 1
             global_summary["total_red_violations"] += 1
