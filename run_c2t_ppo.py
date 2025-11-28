@@ -85,7 +85,18 @@ def prepare_environment(args):
     dic_path["PATH_TO_MODEL"] = str(model_dir)
     dic_path["PATH_TO_DATA"] = str(Path("data") / scenario_meta["template"] / scenario_meta["roadnet"])
 
-    path_check(dic_path)
+    attempt = 0
+    while True:
+        try:
+            path_check(dic_path)
+            break
+        except FileExistsError:
+            attempt += 1
+            suffix = f"{timestamp}-{attempt}"
+            work_dir = Path("records") / "c2t_ppo" / scenario_key / suffix
+            model_dir = Path(args.save_dir) / scenario_key / suffix
+            dic_path["PATH_TO_WORK_DIRECTORY"] = str(work_dir)
+            dic_path["PATH_TO_MODEL"] = str(model_dir)
     copy_conf_file(dic_path, config.DIC_BASE_AGENT_CONF, base_env_conf)
     copy_cityflow_file(dic_path, base_env_conf)
 
