@@ -998,19 +998,26 @@ class CityFlowEnv:
 class TrafficMetrics:
     """
     Compute safety-centric metrics required by the C²T pipeline.
+
+    Design note:
+    - Call `update()` ONCE after each `env.step()` to refresh internal state.
+    - `get_safety_metrics()` is read-only and does NOT mutate historical speed,
+      so repeated calls between two environment steps are safe.
     """
 
     def __init__(self, env: CityFlowEnv, harsh_brake_threshold: float = -4.5, max_ttc: float = 60.0,
-                 red_speed_threshold: float = 1.0):
+                 red_speed_threshold: float = 0.1):
         self.env = env
         self.harsh_brake_threshold = harsh_brake_threshold
         self.max_ttc = max_ttc
+        # speed threshold for filtering out pure stand-still vehicles; keep small to capture slow creeping
         self.red_speed_threshold = red_speed_threshold
         self.delta_t = float(self.env.dic_traffic_env_conf.get("INTERVAL", 1.0))
         self.last_speed: Dict[str, float] = {}
         self.vehicle_lane: Dict[str, str] = {}
         self.lane_to_junction: Dict[str, str] = {}
         self.phase_lane_mapping: Dict[str, Dict[int, Set[str]]] = {}
+        self._last_metrics: Optional[Dict[str, Dict]] = None
         self.refresh_structure_mappings()
 
     def refresh_structure_mappings(self):
@@ -1027,6 +1034,7 @@ class TrafficMetrics:
         """Clear state that should not persist across episodes."""
         self.last_speed.clear()
         self.vehicle_lane.clear()
+        self._last_metrics = None
 
     def _build_lane_to_junction(self) -> Dict[str, str]:
         mapping = {}
@@ -1104,24 +1112,32 @@ class TrafficMetrics:
             "total_queue": 0.0
         }
 
-    def get_safety_metrics(self):
+    def update(self):
+        """
+        Update internal caches and harsh-brake statistics based on the latest env.system_states.
+        This should be called once after every env.step().
+        """
         if not self.env.system_states:
-            return {"per_junction": {}, "global": {"min_ttc": self.max_ttc,
-                                                   "total_harsh_brakes": 0,
-                                                   "total_queue": 0.0,
-                                                   "total_red_violations": 0}}
+            self._last_metrics = {"per_junction": {}, "global": {
+                "min_ttc": self.max_ttc,
+                "total_harsh_brakes": 0,
+                "total_queue": 0.0,
+                "total_red_violations": 0,
+            }}
+            return
 
         lane_vehicles = self.env.system_states.get("get_lane_vehicles", {})
         lane_waiting = self.env.system_states.get("get_lane_waiting_vehicle_count", {})
         vehicle_speed = self.env.system_states.get("get_vehicle_speed", {})
         vehicle_distance = self.env.system_states.get("get_vehicle_distance", {})
+
         self._update_vehicle_lane_cache(lane_vehicles)
         per_junction = defaultdict(self._empty_metrics_template)
         global_summary = {
             "min_ttc": self.max_ttc,
             "total_harsh_brakes": 0,
             "total_queue": 0.0,
-            "total_red_violations": 0
+            "total_red_violations": 0,
         }
 
         current_phase = {}
@@ -1150,26 +1166,36 @@ class TrafficMetrics:
                 junction_id=junction_id,
                 metrics=metrics,
                 global_summary=global_summary,
-                current_phase=current_phase.get(junction_id)
+                current_phase=current_phase.get(junction_id),
             )
 
+        # update harsh brakes based on historical speed
         self._update_harsh_brake_counts(vehicle_speed, per_junction, global_summary)
         self._cleanup_missing_vehicles()
 
-        # finalize metrics
         finalized = {}
-        for junction_id, metrics in per_junction.items():
+        for junction_id, m in per_junction.items():
             finalized[junction_id] = {
-                "min_ttc": float(metrics["min_ttc"]),
-                "harsh_brakes": int(metrics["harsh_brakes"]),
-                "red_violations": int(metrics["red_violations"]),
-                "total_queue": float(metrics["total_queue"])
+                "min_ttc": float(m["min_ttc"]),
+                "harsh_brakes": int(m["harsh_brakes"]),
+                "red_violations": int(m["red_violations"]),
+                "total_queue": float(m["total_queue"]),
             }
 
         if not np.isfinite(global_summary["min_ttc"]):
             global_summary["min_ttc"] = self.max_ttc
 
-        return {"per_junction": finalized, "global": global_summary}
+        self._last_metrics = {"per_junction": finalized, "global": global_summary}
+
+    def get_safety_metrics(self):
+        """
+        Read-only access to last computed safety metrics.
+        Call `update()` after each env.step() to refresh these values.
+        """
+        if self._last_metrics is None:
+            # lazy initialization in case update() has not been called yet
+            self.update()
+        return self._last_metrics
 
     def _lane_min_ttc(self, vehs: List[str], vehicle_speed: Dict[str, float], vehicle_distance: Dict[str, float]) -> Optional[float]:
         if len(vehs) < 2:
@@ -1207,10 +1233,8 @@ class TrafficMetrics:
                 continue
             speed = float(vehicle_speed.get(veh, 0.0))
             if speed <= self.red_speed_threshold:
-                continue
-            veh_info = self.env.eng.get_vehicle_info(veh)
-            veh_speed = float(veh_info.get("speed", 0.0))
-            if veh_speed <= self.red_speed_threshold:
+                # extremely slow creeping can be filtered by a very small threshold;
+                # we keep 0.1 m/s as default so that most rolling movements are counted.
                 continue
             metrics["red_violations"] += 1
             global_summary["total_red_violations"] += 1
