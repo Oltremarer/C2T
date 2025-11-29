@@ -5,6 +5,7 @@ from typing import Dict, Any
 import numpy as np
 
 REF_SPEED = 15.0  # m/s reference for normalization
+MAX_PHASES = 8    # maximum number of signal phases to encode in one-hot
 
 
 def _safe_array(values):
@@ -42,11 +43,15 @@ def extract_c2t_features(state_dict_for_junction: Dict[str, Any],
     safety_red = float(safety_metrics_for_junction.get("red_violations", 0))
     safety_queue = float(safety_metrics_for_junction.get("total_queue", queue_total))
 
-    phase_id = float(state_dict_for_junction.get("phase_id", 0))
+    phase_id_raw = int(state_dict_for_junction.get("phase_id", 0))
+    # CityFlow phases are typically 1-based; map to [0, MAX_PHASES-1]
+    phase_index = max(0, min(MAX_PHASES - 1, phase_id_raw - 1))
+    phase_one_hot = np.zeros(MAX_PHASES, dtype=np.float32)
+    phase_one_hot[phase_index] = 1.0
+
     phase_duration = float(state_dict_for_junction.get("phase_duration", 0.0))
 
-    features = np.array([
-        phase_id,
+    scalar_part = np.array([
         phase_duration,
         queue_total,
         queue_mean,
@@ -62,8 +67,10 @@ def extract_c2t_features(state_dict_for_junction: Dict[str, Any],
         safety_min_ttc,
         safety_brakes,
         safety_red,
-        safety_queue
+        safety_queue,
     ], dtype=np.float32)
+
+    features = np.concatenate([scalar_part[:1], phase_one_hot, scalar_part[1:]], axis=0)
     return features
 
 

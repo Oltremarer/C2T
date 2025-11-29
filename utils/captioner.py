@@ -1,9 +1,15 @@
 from typing import Dict, Any
 import numpy as np
 
-IDX_QUEUE_TOTAL = 2
-IDX_WAIT_MEAN = 7
-IDX_SPEED_MEAN = 10
+# feature layout after one-hot:
+# 0: phase_duration
+# 1-8: phase_one_hot (MAX_PHASES=8)
+# 9: queue_total
+# 14: wait_mean
+# 17: speed_mean
+IDX_QUEUE_TOTAL = 9
+IDX_WAIT_MEAN = 14
+IDX_SPEED_MEAN = 17
 
 
 def generate_structured_caption(features: np.ndarray,

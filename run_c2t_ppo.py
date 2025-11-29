@@ -179,11 +179,13 @@ def main():
         env.reset()
         metrics.refresh_structure_mappings()
         metrics.reset()
+        metrics.update()
         step_rewards_env = []
         step_rewards_intr = []
         lambda_t = schedule_lambda(episode, args.intrinsic_warmup) if args.enable_intrinsic_reward else 0.0
 
         for step in range(args.max_steps):
+            # metrics correspond to current state before action
             safety_metrics = metrics.get_safety_metrics()
             c2t_state = env.get_c2t_state()
 
@@ -198,14 +200,16 @@ def main():
                     "total_queue": 0.0
                 })
                 raw_feat = extract_c2t_features(junction_state, safety)
-                ppo_feat = apply_normalization(raw_feat, feature_norm)
+                # PPO: feed raw features, internal RunningMeanStd will normalize online
+                ppo_feat = raw_feat
                 action, log_prob, value = agent.choose_action(ppo_feat)
                 actions.append(action)
                 step_info.append((ppo_feat, raw_feat, log_prob, value))
 
             _, env_rewards, _, _ = env.step(actions)
+            # update metrics for new state
+            metrics.update()
             safety_metrics_next = metrics.get_safety_metrics()
-            mask = 1.0 if safety_metrics_next["global"]["min_ttc"] > args.ttc_threshold else 0.0
 
             for idx, jid in enumerate(junction_ids):
                 ppo_feat, raw_feat, log_prob, value = step_info[idx]
@@ -222,7 +226,13 @@ def main():
                 intrinsic_norm.update(intrinsic)
                 r_intr_norm = intrinsic_norm.normalize(intrinsic)
 
-                total_reward = r_env_norm + lambda_t * mask * r_intr_norm
+                # junction-level safety mask
+                local_ttc = safety_metrics_next["per_junction"].get(
+                    jid, {"min_ttc": metrics.max_ttc}
+                )["min_ttc"]
+                local_mask = 1.0 if local_ttc > args.ttc_threshold else 0.0
+
+                total_reward = r_env_norm + lambda_t * local_mask * r_intr_norm
                 agent.store(ppo_feat, actions[idx], total_reward, log_prob, value, False)
 
                 step_rewards_env.append(env_reward)
@@ -231,11 +241,19 @@ def main():
         agent.finish_path(last_value=0.0)
         agent.update()
 
+        # compute average mask over last state for logging (approximate)
+        last_masks = []
+        for jid in junction_ids:
+            last_ttc = safety_metrics_next["per_junction"].get(
+                jid, {"min_ttc": metrics.max_ttc}
+            )["min_ttc"]
+            last_masks.append(1.0 if last_ttc > args.ttc_threshold else 0.0)
+
         logs = {
             "reward/env": np.mean(step_rewards_env) if step_rewards_env else 0.0,
             "reward/intrinsic": np.mean(step_rewards_intr) if step_rewards_intr else 0.0,
             "lambda_t": lambda_t,
-            "mask_mean": mask,
+            "mask_mean": float(np.mean(last_masks)) if last_masks else 0.0,
             "metric/global_min_ttc": safety_metrics_next["global"]["min_ttc"],
             "metric/global_harsh_brakes": safety_metrics_next["global"]["total_harsh_brakes"],
             "metric/global_red_violations": safety_metrics_next["global"]["total_red_violations"],

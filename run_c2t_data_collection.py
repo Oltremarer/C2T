@@ -138,6 +138,7 @@ def main():
     env.reset()
     metrics = TrafficMetrics(env)
     metrics.refresh_structure_mappings()
+    metrics.update()
 
     output_root = Path(args.output_dir) / scenario_key
     buffer_file = output_root / f"buffer_{time.strftime('%Y%m%d-%H%M%S')}.jsonl"
@@ -155,7 +156,8 @@ def main():
         for step_idx in range(max_steps):
             actions = [sample_action(args.policy_type, num_phases) for _ in env.list_intersection]
             env.step(actions)
-
+            # update safety metrics once per environment transition
+            metrics.update()
             safety_metrics = metrics.get_safety_metrics()
             state_dict = env.get_c2t_state()
             per_junction_metrics = safety_metrics.get("per_junction", {})
