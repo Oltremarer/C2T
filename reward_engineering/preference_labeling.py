@@ -252,6 +252,19 @@ def create_llm_provider(llm_type: str, model_name: Optional[str] = None, model_p
 
 def parse_llm_response(response_text: str) -> Optional[int]:
     response_text = response_text.strip()
+    # Handle common Markdown code fences like ```json ... ```
+    if response_text.startswith("```"):
+        # remove leading ```xxx and trailing ```
+        # find first '{' and last '}' to extract JSON object
+        start = response_text.find("{")
+        end = response_text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            response_text = response_text[start : end + 1]
+        else:
+            # fallback: strip fences heuristically
+            lines = [ln for ln in response_text.splitlines() if not ln.strip().startswith("```")]
+            response_text = "\n".join(lines).strip()
+
     try:
         parsed = json.loads(response_text.replace("'", '"'))
     except json.JSONDecodeError:
