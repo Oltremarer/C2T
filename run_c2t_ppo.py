@@ -75,6 +75,11 @@ def prepare_environment(args):
         "ROADNET_FILE": f"roadnet_{scenario_meta['roadnet']}.json",
         "RUN_COUNTS": args.max_steps or scenario_meta["steps"],
         "CITYFLOW_SEED": args.seed,
+        # Set reward weights: negative to encourage reducing queue/pressure
+        "DIC_REWARD_INFO": {
+            "queue_length": -1.0,  # Negative: lower queue = higher reward
+            "pressure": -1.0,      # Negative: lower pressure = higher reward
+        },
     })
 
     dic_path = deepcopy(config.DIC_PATH)
