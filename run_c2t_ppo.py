@@ -187,6 +187,9 @@ def main():
         metrics.update()
         step_rewards_env = []
         step_rewards_intr = []
+        step_env_norm_vals = []
+        step_intr_norm_vals = []
+        mask_values = []
         lambda_t = schedule_lambda(episode, args.intrinsic_warmup) if args.enable_intrinsic_reward else 0.0
 
         for step in range(args.max_steps):
@@ -231,38 +234,46 @@ def main():
                 intrinsic_norm.update(intrinsic)
                 r_intr_norm = intrinsic_norm.normalize(intrinsic)
 
-                # junction-level safety mask
+                # junction-level safety indicator (for logging / analysis only)
                 local_ttc = safety_metrics_next["per_junction"].get(
                     jid, {"min_ttc": metrics.max_ttc}
                 )["min_ttc"]
                 local_mask = 1.0 if local_ttc > args.ttc_threshold else 0.0
+                mask_values.append(local_mask)
 
-                total_reward = r_env_norm + lambda_t * local_mask * r_intr_norm
+                # NOTE: mask is no longer used to zero-out intrinsic reward.
+                # We allow intrinsic to provide guidance even when TTC is low.
+                total_reward = r_env_norm + lambda_t * r_intr_norm
                 agent.store(ppo_feat, actions[idx], total_reward, log_prob, value, False)
 
                 step_rewards_env.append(env_reward)
                 step_rewards_intr.append(intrinsic)
+                step_env_norm_vals.append(r_env_norm)
+                step_intr_norm_vals.append(r_intr_norm)
 
         agent.finish_path(last_value=0.0)
         agent.update()
 
-        # compute average mask over last state for logging (approximate)
-        last_masks = []
-        for jid in junction_ids:
-            last_ttc = safety_metrics_next["per_junction"].get(
-                jid, {"min_ttc": metrics.max_ttc}
-            )["min_ttc"]
-            last_masks.append(1.0 if last_ttc > args.ttc_threshold else 0.0)
+        # compute average mask activation rate over the episode (for analysis)
+        mask_mean = float(np.mean(mask_values)) if mask_values else 0.0
+        # estimate intrinsic raw std from running stats
+        intrinsic_variance = intrinsic_norm.m2 / max(intrinsic_norm.count, 1.0)
+        intrinsic_std = float(np.sqrt(max(intrinsic_variance, 1e-8)))
 
         logs = {
             "reward/env": np.mean(step_rewards_env) if step_rewards_env else 0.0,
             "reward/intrinsic": np.mean(step_rewards_intr) if step_rewards_intr else 0.0,
             "lambda_t": lambda_t,
-            "mask_mean": float(np.mean(last_masks)) if last_masks else 0.0,
+            "mask_mean": mask_mean,
             "metric/global_min_ttc": safety_metrics_next["global"]["min_ttc"],
             "metric/global_harsh_brakes": safety_metrics_next["global"]["total_harsh_brakes"],
             "metric/global_red_violations": safety_metrics_next["global"]["total_red_violations"],
             "metric/global_queue": safety_metrics_next["global"]["total_queue"],
+            # debug signals for analysis
+            "debug/env_norm_val": np.mean(step_env_norm_vals) if step_env_norm_vals else 0.0,
+            "debug/intr_norm_val": np.mean(step_intr_norm_vals) if step_intr_norm_vals else 0.0,
+            "debug/mask_active_rate": mask_mean,
+            "debug/raw_intrinsic_std": intrinsic_std,
         }
         for key, value in logs.items():
             writer.add_scalar(key, value, episode)
