@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 PROMPT_TEMPLATE = """You are a traffic safety and operations expert.
-Compare these two traffic states:
+Compare these two traffic states and decide which one is better.
 
 State A:
 {caption_a}
@@ -23,8 +23,12 @@ Criteria (in order of importance):
 2) Efficiency: lower queue length and lower delay.
 3) Smoothness: fewer abrupt changes in traffic conditions.
 
-Which state is better overall?
-Respond ONLY with a JSON object: {{'better_state': 'A'}} or {{'better_state': 'B'}}."""
+IMPORTANT INSTRUCTIONS:
+- Respond ONLY with a single JSON object exactly in ONE LINE.
+- The JSON must be either {{'better_state': 'A'}} or {{'better_state': 'B'}}.
+- Do NOT add explanations, lists, reasoning, markdown code fences, or any other text.
+
+Your response:"""
 
 
 @dataclass
@@ -252,29 +256,56 @@ def create_llm_provider(llm_type: str, model_name: Optional[str] = None, model_p
 
 def parse_llm_response(response_text: str) -> Optional[int]:
     response_text = response_text.strip()
-    # Handle common Markdown code fences like ```json ... ```
-    if response_text.startswith("```"):
-        # remove leading ```xxx and trailing ```
-        # find first '{' and last '}' to extract JSON object
-        start = response_text.find("{")
-        end = response_text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            response_text = response_text[start : end + 1]
-        else:
-            # fallback: strip fences heuristically
-            lines = [ln for ln in response_text.splitlines() if not ln.strip().startswith("```")]
-            response_text = "\n".join(lines).strip()
 
+    def _clean_code_fence(text: str) -> str:
+        if text.startswith("```"):
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return text[start : end + 1]
+            # fallback: remove ``` lines
+            lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
+            return "\n".join(lines).strip()
+        return text
+
+    def _extract_state(obj) -> Optional[int]:
+        if isinstance(obj, dict):
+            if "better_state" in obj:
+                val = str(obj["better_state"]).strip().upper()
+                if val == "A":
+                    return 1
+                if val == "B":
+                    return 0
+            if "state" in obj:
+                val = str(obj["state"]).strip().upper()
+                if val == "A":
+                    return 1
+                if val == "B":
+                    return 0
+            # Sometimes nested answers store result under other keys
+            for key in obj:
+                res = _extract_state(obj[key])
+                if res is not None:
+                    return res
+        elif isinstance(obj, list):
+            for item in obj:
+                res = _extract_state(item)
+                if res is not None:
+                    return res
+        elif isinstance(obj, str):
+            stripped = obj.strip().upper()
+            if stripped in {"A", "STATE A", "OPTION A"}:
+                return 1
+            if stripped in {"B", "STATE B", "OPTION B"}:
+                return 0
+        return None
+
+    cleaned = _clean_code_fence(response_text)
     try:
-        parsed = json.loads(response_text.replace("'", '"'))
+        parsed = json.loads(cleaned.replace("'", '"'))
     except json.JSONDecodeError:
         return None
-    better_state = parsed.get("better_state")
-    if better_state == "A":
-        return 1
-    if better_state == "B":
-        return 0
-    return None
+    return _extract_state(parsed)
 
 
 def create_preference_record(rec_a: dict, rec_b: dict, label: int, score: float) -> PreferenceRecord:
@@ -319,7 +350,7 @@ def parse_args():
                         help="Device for local models (default: auto-detect).")
     
     parser.add_argument("--max_pairs", type=int, default=1000, help="Maximum number of preference pairs to label.")
-    parser.add_argument("--min_score", type=float, default=2.0, help="Minimum informative score to consider a pair.")
+    parser.add_argument("--min_score", type=float, default=1.0, help="Minimum informative score to consider a pair.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--use_mock_labeler", action="store_true",
                         help="[Deprecated] Use --llm_type=mock instead. If set, bypass LLM and generate labels via heuristic.")
