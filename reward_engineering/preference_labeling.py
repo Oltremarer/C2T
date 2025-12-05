@@ -18,10 +18,21 @@ State A:
 State B:
 {caption_b}
 
-Criteria (in order of importance):
-1) Safety: higher TTC, fewer harsh brakes, fewer red-light violations.
-2) Efficiency: lower queue length and lower delay.
-3) Smoothness: fewer abrupt changes in traffic conditions.
+CRITICAL CRITERIA (all must be considered together):
+1) Safety: Higher TTC is good, BUT only if it comes from smooth flow, NOT from gridlock.
+   - A stopped intersection (gridlock) is UNSAFE because it blocks emergency vehicles and increases accident risk.
+   - Moving traffic is safer than stationary traffic, even if TTC is temporarily lower.
+   - High TTC from gridlock should be PENALIZED, not rewarded.
+2) Flow Stability: Lower queue length and lower delay indicate better flow.
+   - Excessive queues (>20 vehicles per junction) are precursors to accidents and must be heavily penalized.
+   - A state with slightly lower TTC but much better flow may be SAFER overall.
+3) Smoothness: Fewer harsh brakes and red-light violations indicate better signal timing.
+
+IMPORTANT EVALUATION RULES:
+- A state is only "better" if it improves BOTH safety AND efficiency.
+- If State A has higher TTC but much longer queues, it is NOT necessarily better.
+- If State B has slightly lower TTC but much better flow, it may be better overall.
+- Penalize scenarios with excessive queue lengths heavily, as they are unsafe.
 
 IMPORTANT INSTRUCTIONS:
 - Respond ONLY with a single JSON object exactly in ONE LINE.

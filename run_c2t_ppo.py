@@ -123,7 +123,14 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=1000)
     parser.add_argument("--intrinsic_warmup", type=int, default=20,
                         help="Episode count to linearly increase intrinsic weight from 0 to 1.")
-    parser.add_argument("--ttc_threshold", type=float, default=1.5)
+    parser.add_argument("--ttc_threshold", type=float, default=1.5,
+                        help="Minimum TTC threshold for safety mask.")
+    parser.add_argument("--queue_threshold", type=float, default=20.0,
+                        help="Maximum queue length per junction to enable intrinsic reward. "
+                             "If queue exceeds this, mask is set to 0 to prevent rewarding gridlock.")
+    parser.add_argument("--intrinsic_clip_max", type=float, default=None,
+                        help="Maximum value for normalized intrinsic reward (None = no clip). "
+                             "Useful if RewardNet outputs are too high and overwhelm env reward.")
     parser.add_argument("--enable_intrinsic_reward", action="store_true")
     parser.add_argument("--feature_norm_path", type=str, required=True,
                         help="Path to PPO feature normalization params.")
@@ -234,16 +241,25 @@ def main():
                 intrinsic_norm.update(intrinsic)
                 r_intr_norm = intrinsic_norm.normalize(intrinsic)
 
-                # junction-level safety indicator (for logging / analysis only)
+                # Smart mask: only enable intrinsic reward when BOTH safe (TTC) AND not congested (queue)
                 local_ttc = safety_metrics_next["per_junction"].get(
-                    jid, {"min_ttc": metrics.max_ttc}
+                    jid, {"min_ttc": metrics.max_ttc, "total_queue": 0.0}
                 )["min_ttc"]
-                local_mask = 1.0 if local_ttc > args.ttc_threshold else 0.0
+                junction_queue = safety_metrics_next["per_junction"].get(
+                    jid, {"min_ttc": metrics.max_ttc, "total_queue": 0.0}
+                )["total_queue"]
+                
+                is_safe_ttc = local_ttc > args.ttc_threshold
+                is_not_congested = junction_queue < args.queue_threshold
+                local_mask = 1.0 if (is_safe_ttc and is_not_congested) else 0.0
                 mask_values.append(local_mask)
 
-                # NOTE: mask is no longer used to zero-out intrinsic reward.
-                # We allow intrinsic to provide guidance even when TTC is low.
-                total_reward = r_env_norm + lambda_t * r_intr_norm
+                # Clip intrinsic reward if specified (to prevent it from overwhelming env reward)
+                if args.intrinsic_clip_max is not None:
+                    r_intr_norm = np.clip(r_intr_norm, a_min=None, a_max=args.intrinsic_clip_max)
+                
+                # Apply mask: disable intrinsic reward when unsafe or congested
+                total_reward = r_env_norm + lambda_t * local_mask * r_intr_norm
                 agent.store(ppo_feat, actions[idx], total_reward, log_prob, value, False)
 
                 step_rewards_env.append(env_reward)
