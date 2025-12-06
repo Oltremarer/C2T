@@ -100,7 +100,6 @@ def main():
     print(f"[Sweep] Starting parameter sweep for queue_threshold")
     print(f"[Sweep] Values to test: {queue_thresholds}")
     print(f"[Sweep] Total experiments: {len(queue_thresholds)}")
-    print(f"[Sweep] Parallel mode: {args.parallel} (max {args.max_parallel} concurrent)")
     
     # Prepare base arguments
     base_args = {
