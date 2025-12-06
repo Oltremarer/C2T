@@ -1,6 +1,6 @@
 #!/bin/bash
 # Parameter sweep script for GPU 1
-# Tests queue_threshold values: 30.0, 35.0, 40.0, 45.0
+# Tests queue_threshold values: 30.0, 40.0
 
 python run_queue_threshold_sweep.py \
   --scenario jinan \
@@ -11,7 +11,7 @@ python run_queue_threshold_sweep.py \
   --reward_feature_norm_path model_weights/c2t_reward/jinan/feature_norm_v3.json \
   --reward_model_path model_weights/c2t_reward/jinan/reward_model_v3.pth \
   --reward_norm_path model_weights/c2t_reward/jinan/reward_norm_v3.json \
-  --queue_thresholds "30.0,35.0,40.0,45.0" \
+  --queue_thresholds "30.0,40.0" \
   --gpu_id 1 \
   --use_wandb \
   --wandb_project c2t-sweep \
